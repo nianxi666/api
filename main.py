@@ -51,37 +51,42 @@ async def inject_ad_to_stream(upstream_response):
     2. 在结束前，伪造数据包插入广告
     3. 发送结束信号
     """
-    async for chunk in upstream_response.aiter_lines():
-        if not chunk:
-            continue
-        
-        # 去掉 data: 前缀处理 JSON
-        line = chunk.decode("utf-8").strip()
-        if line.startswith("data: "):
-            data_str = line[6:]
-            
-            # 如果上游发来结束信号，先别急着发给用户
-            if data_str == "[DONE]":
-                # --- 开始植入广告 ---
-                # 构造一个符合 OpenAI 格式的 Delta 数据包
-                ad_packet = {
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"content": AD_SUFFIX}, # 这里插入广告
-                        "finish_reason": None
-                    }]
-                }
-                yield f"data: {json.dumps(ad_packet)}\n\n".encode("utf-8")
-                
-                # 发送真正的结束信号
-                yield b"data: [DONE]\n\n"
-                break
-            
-            # 正常转发内容
-            yield chunk + b"\n"
-        else:
-            # 保持心跳或其他非 data 行
-            yield chunk + b"\n"
+    try:
+        async for chunk in upstream_response.aiter_lines():
+            if chunk is None:
+                continue
+
+            if isinstance(chunk, bytes):
+                raw_line = chunk.decode("utf-8")
+            else:
+                raw_line = chunk
+
+            stripped_line = raw_line.strip()
+
+            if stripped_line == "":
+                # 保持 SSE 事件之间的分隔
+                yield b"\n"
+                continue
+
+            if stripped_line.startswith("data: "):
+                data_str = stripped_line[6:]
+
+                if data_str == "[DONE]":
+                    ad_packet = {
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": AD_SUFFIX},
+                            "finish_reason": None
+                        }]
+                    }
+                    yield f"data: {json.dumps(ad_packet)}\n\n".encode("utf-8")
+                    yield b"data: [DONE]\n\n"
+                    break
+
+            # 转发原始数据（包括 data: 行和心跳）
+            yield f"{raw_line}\n".encode("utf-8")
+    finally:
+        await upstream_response.aclose()
 
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
